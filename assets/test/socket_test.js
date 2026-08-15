@@ -6,6 +6,41 @@ import {AUTH_TOKEN_PREFIX, SOCKET_STATES} from "../js/phoenix/constants"
 
 let socket
 
+const setVisibilityState = state => {
+  Object.defineProperty(document, "visibilityState", {value: state, writable: true})
+}
+
+const socketWithLifecycleListeners = (opts = {}) => {
+  const windowListeners = {}
+  const documentListeners = {}
+  const windowListenerSpy = jest.spyOn(window, "addEventListener").mockImplementation((event, listener) => {
+    windowListeners[event] = listener
+  })
+  const documentListenerSpy = jest.spyOn(document, "addEventListener").mockImplementation((event, listener) => {
+    documentListeners[event] = listener
+  })
+
+  try {
+    socket = new Socket("/socket", opts)
+  } finally {
+    windowListenerSpy.mockRestore()
+    documentListenerSpy.mockRestore()
+  }
+
+  return {socket, windowListeners, documentListeners}
+}
+
+const reconnectingTransport = connections => function ReconnectingTransport(){
+  const connection = {
+    readyState: SOCKET_STATES.open,
+    bufferedAmount: 0,
+    close(){ this.readyState = SOCKET_STATES.closed },
+    send(){ }
+  }
+  connections.push(connection)
+  return connection
+}
+
 describe("with transports", function (){
   beforeAll(() => {
     window.WebSocket = WebSocket
@@ -138,6 +173,126 @@ describe("with transports", function (){
       window.dispatchEvent(new Event("visibilitychange"))
 
       expect(teardownSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("page lifecycle", function (){
+    afterEach(function (){
+      setVisibilityState("visible")
+      jest.useRealTimers()
+    })
+
+    it("derives pageHidden from the current document state without an event", function (){
+      const {socket} = socketWithLifecycleListeners()
+
+      setVisibilityState("hidden")
+      expect(socket.pageHidden).toBe(true)
+
+      setVisibilityState("visible")
+      expect(socket.pageHidden).toBe(false)
+    })
+
+    it("reconnects after a visible resume followed by an abnormal close", function (){
+      jest.useFakeTimers()
+      const connections = []
+      const {socket, documentListeners} = socketWithLifecycleListeners({
+        transport: reconnectingTransport(connections),
+        reconnectAfterMs: () => 10
+      })
+
+      setVisibilityState("hidden")
+      socket.connect()
+      const originalConnection = socket.conn
+
+      setVisibilityState("visible")
+      documentListeners.resume()
+      expect(connections.length).toBe(1)
+
+      originalConnection.readyState = SOCKET_STATES.closed
+      socket.onConnClose({code: 1006})
+      jest.advanceTimersByTime(10)
+
+      expect(connections.length).toBe(2)
+      expect(socket.conn).not.toBe(originalConnection)
+    })
+
+    it("waits while hidden and reconnects on resume after the timer has fired", function (){
+      jest.useFakeTimers()
+      const connections = []
+      const {socket, documentListeners} = socketWithLifecycleListeners({
+        transport: reconnectingTransport(connections),
+        reconnectAfterMs: () => 10
+      })
+
+      setVisibilityState("hidden")
+      socket.connect()
+      socket.conn.readyState = SOCKET_STATES.closed
+      socket.onConnClose({code: 1006})
+      jest.advanceTimersByTime(10)
+
+      expect(connections.length).toBe(1)
+      expect(socket.conn).toBeNull()
+
+      setVisibilityState("visible")
+      documentListeners.resume()
+
+      expect(connections.length).toBe(2)
+    })
+
+    it("reconnects an uncleanly closed socket on focus", function (){
+      const {socket, windowListeners} = socketWithLifecycleListeners()
+      socket.closeWasClean = false
+      const teardownSpy = jest.spyOn(socket, "teardown")
+
+      setVisibilityState("visible")
+      windowListeners.focus()
+
+      expect(teardownSpy).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not restart a connection that is still opening on resume or focus", function (){
+      const connections = []
+      const {socket, windowListeners, documentListeners} = socketWithLifecycleListeners({
+        transport: reconnectingTransport(connections)
+      })
+
+      setVisibilityState("visible")
+      socket.connect()
+      socket.conn.readyState = SOCKET_STATES.connecting
+      documentListeners.resume()
+      windowListeners.focus()
+
+      expect(connections.length).toBe(1)
+    })
+
+    it("does not reconnect an explicitly disconnected socket on resume or focus", function (){
+      const {socket, windowListeners, documentListeners} = socketWithLifecycleListeners()
+      socket.closeWasClean = true
+      const teardownSpy = jest.spyOn(socket, "teardown")
+
+      setVisibilityState("visible")
+      documentListeners.resume()
+      windowListeners.focus()
+
+      expect(teardownSpy).not.toHaveBeenCalled()
+    })
+
+    it("keeps a clean pagehide disconnected until pageshow", function (){
+      const connections = []
+      const {socket, windowListeners, documentListeners} = socketWithLifecycleListeners({
+        transport: reconnectingTransport(connections)
+      })
+
+      setVisibilityState("visible")
+      socket.connect()
+      windowListeners.pagehide()
+      documentListeners.resume()
+      windowListeners.focus()
+
+      expect(connections.length).toBe(1)
+
+      windowListeners.pageshow()
+      expect(connections.length).toBe(2)
     })
   })
 
