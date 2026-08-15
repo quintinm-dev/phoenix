@@ -250,6 +250,21 @@ describe("with transports", function (){
       expect(teardownSpy).toHaveBeenCalledTimes(1)
     })
 
+    it("does not restart a connection that is still opening on resume or focus", function (){
+      const connections = []
+      const {socket, windowListeners, documentListeners} = socketWithLifecycleListeners({
+        transport: reconnectingTransport(connections)
+      })
+
+      setVisibilityState("visible")
+      socket.connect()
+      socket.conn.readyState = SOCKET_STATES.connecting
+      documentListeners.resume()
+      windowListeners.focus()
+
+      expect(connections.length).toBe(1)
+    })
+
     it("does not reconnect an explicitly disconnected socket on resume or focus", function (){
       const {socket, windowListeners, documentListeners} = socketWithLifecycleListeners()
       socket.closeWasClean = true

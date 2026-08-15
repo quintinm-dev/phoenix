@@ -1112,7 +1112,7 @@ var Socket = class {
         }
       });
       let reconnectOnPageVisible = () => {
-        if (!this.pageHidden && !this.isConnected() && !this.closeWasClean) {
+        if (!this.pageHidden && this.connectionState() === "closed" && !this.closeWasClean) {
           if (this.reconnectTimer) {
             this.reconnectTimer.reset();
           }
